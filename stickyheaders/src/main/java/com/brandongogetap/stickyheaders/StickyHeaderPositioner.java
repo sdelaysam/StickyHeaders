@@ -41,11 +41,22 @@ final class StickyHeaderPositioner {
     private int lastBoundPosition = INVALID_POSITION;
     private List<Integer> headerPositions;
     private int orientation;
-    private boolean dirty;
     private float headerElevation = NO_ELEVATION;
     private int cachedElevation = NO_ELEVATION;
     private RecyclerView.ViewHolder currentViewHolder;
     @Nullable private StickyHeaderListener listener;
+
+    private View headerToRemove = null;
+    private Runnable removeCurrentHeader = new Runnable() {
+        @Override
+        public void run() {
+            ViewGroup parent = getRecyclerParent();
+            if (headerToRemove != null && headerToRemove.getParent() == parent) {
+                parent.removeView(headerToRemove);
+                headerToRemove = null;
+            }
+        }
+    };
 
     StickyHeaderPositioner(RecyclerView recyclerView) {
         this.recyclerView = recyclerView;
@@ -68,8 +79,7 @@ final class StickyHeaderPositioner {
         if (headerPositionToShow != lastBoundPosition) {
             if (headerPositionToShow == INVALID_POSITION ||
                     checkMargins && headerAwayFromEdge(headerToCopy)) { // We don't want to attach yet if header view is not at edge
-                dirty = true;
-                safeDetachHeader();
+                clearHeader();
                 lastBoundPosition = INVALID_POSITION;
             } else {
                 lastBoundPosition = headerPositionToShow;
@@ -133,8 +143,7 @@ final class StickyHeaderPositioner {
     void reset(int orientation) {
         this.orientation = orientation;
         lastBoundPosition = INVALID_POSITION;
-        dirty = true;
-        safeDetachHeader();
+        clearHeader();
     }
 
     void clearHeader() {
@@ -234,25 +243,29 @@ final class StickyHeaderPositioner {
             currentViewHolder.itemView.requestLayout();
             checkTranslation();
             callAttach(headerPosition);
-            dirty = false;
             return;
         }
         detachHeader(lastBoundPosition);
         this.currentViewHolder = viewHolder;
         //noinspection unchecked
         recyclerView.getAdapter().onBindViewHolder(currentViewHolder, headerPosition);
-        this.currentHeader = currentViewHolder.itemView;
+        currentHeader = currentViewHolder.itemView;
+        if (currentHeader == headerToRemove) {
+            getRecyclerParent().removeCallbacks(removeCurrentHeader);
+            headerToRemove = null;
+        }
         callAttach(headerPosition);
         resolveElevationSettings(currentHeader.getContext());
         // Set to Invisible until we position it in #checkHeaderPositions.
         currentHeader.setVisibility(View.INVISIBLE);
         currentHeader.setId(R.id.header_view);
         recyclerView.getViewTreeObserver().addOnGlobalLayoutListener(visibilityObserver);
-        getRecyclerParent().addView(currentHeader);
+        if (currentHeader.getParent() == null) {
+            getRecyclerParent().addView(currentHeader);
+        }
         if (checkMargins) {
             updateLayoutParams(currentHeader);
         }
-        dirty = false;
     }
 
     private int currentDimension() {
@@ -348,9 +361,13 @@ final class StickyHeaderPositioner {
 
     private void detachHeader(int position) {
         if (currentHeader != null) {
-            getRecyclerParent().removeView(currentHeader);
+            headerToRemove = currentHeader;
+            getRecyclerParent().post(removeCurrentHeader);
             callDetach(position);
             clearVisibilityObserver();
+            if (recyclerView.getAdapter() != null && currentViewHolder != null) {
+                recyclerView.getAdapter().onViewRecycled(currentViewHolder);
+            }
             currentHeader = null;
             currentViewHolder = null;
         }
@@ -426,21 +443,6 @@ final class StickyHeaderPositioner {
                         checkHeaderPositions(visibleHeaders);
                     }
                 });
-    }
-
-    /**
-     * Detaching while {@link StickyLayoutManager} is laying out children can cause an inconsistent
-     * state in the child count variable in {@link android.widget.FrameLayout} layoutChildren method
-     */
-    private void safeDetachHeader() {
-        final int cachedPosition = lastBoundPosition;
-        getRecyclerParent().post(new Runnable() {
-            @Override public void run() {
-                if (dirty) {
-                    detachHeader(cachedPosition);
-                }
-            }
-        });
     }
 
     /**
